@@ -19,6 +19,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/apache/devlake/server/api/shared"
@@ -34,6 +35,11 @@ type SlackTestConnResponse struct {
 	Connection *models.SlackConn
 }
 
+type slackAuthTestResp struct {
+	Ok    bool   `json:"ok"`
+	Error string `json:"error"`
+}
+
 func testConnection(ctx context.Context, connection models.SlackConn) (*SlackTestConnResponse, errors.Error) {
 	// validate
 	if vld != nil {
@@ -42,9 +48,33 @@ func testConnection(ctx context.Context, connection models.SlackConn) (*SlackTes
 		}
 	}
 	// test connection
-	_, err := api.NewApiClientFromConnection(context.TODO(), basicRes, &connection)
+	apiClient, err := api.NewApiClientFromConnection(ctx, basicRes, &connection)
 	if err != nil {
 		return nil, err
+	}
+	// auth.test is the Slack Web API method for checking a token. Slack answers
+	// a bad token with HTTP 200 and {"ok": false, "error": "invalid_auth"}, so
+	// the "ok" field has to be checked, not only the status code.
+	res, err := apiClient.Get("auth.test", nil, nil)
+	if err != nil {
+		return nil, errors.BadInput.Wrap(err, "verify token failed")
+	}
+	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+		return nil, errors.HttpStatus(http.StatusBadRequest).New("authentication failed, please check your token")
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, errors.HttpStatus(res.StatusCode).New(fmt.Sprintf("unexpected status code while testing connection: %d", res.StatusCode))
+	}
+	authTest := &slackAuthTestResp{}
+	if err = api.UnmarshalResponse(res, authTest); err != nil {
+		return nil, err
+	}
+	if !authTest.Ok {
+		errorCode := authTest.Error
+		if errorCode == "" {
+			errorCode = "unknown error"
+		}
+		return nil, errors.BadInput.New("slack auth.test error: " + errorCode)
 	}
 	connection = connection.Sanitize()
 	body := SlackTestConnResponse{}
